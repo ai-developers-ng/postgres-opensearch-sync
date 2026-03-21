@@ -1,0 +1,499 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'PostgreSQL to OpenSearch Serverless - Glue Initial Load + Lambda Incremental Sync'
+
+Parameters:
+
+  Environment:
+    Type: String
+    AllowedValues: [dev, stg, prd]
+    Description: Deployment environment (dev, stg, prd)
+
+  PostgresHost:
+    Type: String
+    Description: RDS PostgreSQL host endpoint
+
+  PostgresPort:
+    Type: String
+    Default: '5445'
+    Description: PostgreSQL port
+
+  PostgresDb:
+    Type: String
+    Description: PostgreSQL database name
+
+  PostgresTable:
+    Type: String
+    Description: Source table e.g. public.documents
+
+  PostgresSecretName:
+    Type: String
+    Description: Name of the existing Secrets Manager secret e.g. prod/postgres/myapp
+
+  OpenSearchEndpoint:
+    Type: String
+    Description: OpenSearch Serverless collection endpoint (https://xxx.region.aoss.amazonaws.com)
+
+  OpenSearchCollectionId:
+    Type: String
+    Description: OpenSearch Serverless collection ID (for IAM resource ARN)
+
+  OpenSearchIndex:
+    Type: String
+    Description: Target OpenSearch index name
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where RDS resides
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet 1 (same VPC as RDS)
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet 2 (same VPC as RDS)
+
+  GlueWorkerType:
+    Type: String
+    Default: G.2X
+    AllowedValues: [G.1X, G.2X, G.4X]
+    Description: Glue worker type
+
+  GlueNumberOfWorkers:
+    Type: Number
+    Default: 10
+    Description: Number of Glue workers for initial load
+
+  LambdaMemorySize:
+    Type: Number
+    Default: 512
+    AllowedValues: [256, 512, 1024]
+
+  LambdaBatchSize:
+    Type: Number
+    Default: 50
+    Description: OpenSearch bulk batch size per Lambda invocation
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for failure alerts
+
+  AssetsBucketName:
+    Type: String
+    Description: Existing S3 bucket name for Glue scripts, JARs, dependencies and checkpoints
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prd]
+
+Mappings:
+  EnvConfig:
+    dev:
+      GlueTimeout: 60
+      LambdaTimeout: 58
+      LogRetentionDays: 3
+      GlueWorkers: 2
+    stg:
+      GlueTimeout: 120
+      LambdaTimeout: 58
+      LogRetentionDays: 7
+      GlueWorkers: 5
+    prd:
+      GlueTimeout: 240
+      LambdaTimeout: 58
+      LogRetentionDays: 30
+      GlueWorkers: 10
+
+Resources:
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'opensearch-sync-alerts-${Environment}'
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref NotificationEmail
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SyncSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub 'opensearch-sync-sg-${Environment}'
+      GroupDescription: Security group for Glue and Lambda sync jobs
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: '0.0.0.0/0'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub 'opensearch-sync-sg-${Environment}'
+
+  SecretLookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'SecretLookupRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*'
+
+  SecretArnLookupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'secret-arn-lookup-${Environment}'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SecretLookupRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3, cfnresponse
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  secret_name = event['ResourceProperties']['SecretName']
+                  client = boto3.client('secretsmanager')
+                  response = client.describe_secret(SecretId=secret_name)
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'SecretArn': response['ARN']})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  SecretArnLookup:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SecretArnLookupFunction.Arn
+      SecretName: !Ref PostgresSecretName
+
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    DependsOn: SecretArnLookup
+    Properties:
+      RoleName: !Sub 'GlueOpenSearchRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket]
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AssetsBucketName}'
+                  - !Sub 'arn:aws:s3:::${AssetsBucketName}/*'
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !GetAtt SecretArnLookup.SecretArn
+        - PolicyName: AOSSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [aoss:APIAccessAll]
+                Resource: !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/${OpenSearchCollectionId}'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    DependsOn: SecretArnLookup
+    Properties:
+      RoleName: !Sub 'LambdaOpenSearchSyncRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub 'arn:aws:s3:::${AssetsBucketName}/checkpoints/*'
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !GetAtt SecretArnLookup.SecretArn
+        - PolicyName: AOSSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [aoss:APIAccessAll]
+                Resource: !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/${OpenSearchCollectionId}'
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [sns:Publish]
+                Resource: !Ref AlertTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  GlueLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws-glue/jobs/opensearch-sync-${Environment}'
+      RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/opensearch-incremental-sync-${Environment}'
+      RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
+
+  GluePostgresConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub 'postgres-connection-${Environment}'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub 'jdbc:postgresql://${PostgresHost}:${PostgresPort}/${PostgresDb}'
+          USERNAME: !Sub '{{resolve:secretsmanager:${PostgresSecretName}:SecretString:username}}'
+          PASSWORD: !Sub '{{resolve:secretsmanager:${PostgresSecretName}:SecretString:password}}'
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select [0, !GetAZs '']
+          SubnetId: !Ref PrivateSubnet1
+          SecurityGroupIdList:
+            - !Ref SyncSecurityGroup
+
+  GlueInitialLoadJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'postgres-to-opensearch-initial-load-${Environment}'
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: '4.0'
+      WorkerType: !Ref GlueWorkerType
+      NumberOfWorkers: !FindInMap [EnvConfig, !Ref Environment, GlueWorkers]
+      Timeout: !FindInMap [EnvConfig, !Ref Environment, GlueTimeout]
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${AssetsBucketName}/scripts/initial_load.py'
+        PythonVersion: '3'
+      Connections:
+        Connections:
+          - !Ref GluePostgresConnection
+      DefaultArguments:
+        '--extra-jars': !Sub 's3://${AssetsBucketName}/jars/postgresql-42.7.3.jar'
+        '--extra-py-files': !Sub 's3://${AssetsBucketName}/jars/dependencies.zip'
+        '--job-language': 'python'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-metrics': 'true'
+        '--TempDir': !Sub 's3://${AssetsBucketName}/temp/'
+        '--conf': 'spark.sql.shuffle.partitions=20 --conf spark.default.parallelism=20'
+        '--postgres_host': !Ref PostgresHost
+        '--postgres_port': !Ref PostgresPort
+        '--postgres_db': !Ref PostgresDb
+        '--postgres_secret_arn': !GetAtt SecretArnLookup.SecretArn
+        '--postgres_table': !Ref PostgresTable
+        '--opensearch_endpoint': !Ref OpenSearchEndpoint
+        '--opensearch_index': !Ref OpenSearchIndex
+        '--aws_region': !Ref AWS::Region
+        '--checkpoint_bucket': !Ref AssetsBucketName
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Tags:
+        Environment: !Ref Environment
+
+  IncrementalSyncLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
+    Properties:
+      FunctionName: !Sub 'opensearch-incremental-sync-${Environment}'
+      Runtime: python3.12
+      Handler: lambda_function.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !FindInMap [EnvConfig, !Ref Environment, LambdaTimeout]
+      MemorySize: !Ref LambdaMemorySize
+      ReservedConcurrentExecutions: 1
+      Code:
+        S3Bucket: !Ref AssetsBucketName
+        S3Key: scripts/incremental_sync.zip
+      Environment:
+        Variables:
+          POSTGRES_HOST: !Ref PostgresHost
+          POSTGRES_PORT: !Ref PostgresPort
+          POSTGRES_DB: !Ref PostgresDb
+          POSTGRES_TABLE: !Ref PostgresTable
+          POSTGRES_SECRET_ARN: !GetAtt SecretArnLookup.SecretArn
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
+          OPENSEARCH_INDEX: !Ref OpenSearchIndex
+          CHECKPOINT_BUCKET: !Ref AssetsBucketName
+          BATCH_SIZE: !Sub '${LambdaBatchSize}'
+          ENVIRONMENT: !Ref Environment
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref SyncSecurityGroup
+      Tags:
+        Environment: !Ref Environment
+
+  SyncScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'opensearch-sync-schedule-${Environment}'
+      Description: !Sub 'Trigger incremental sync every minute - ${Environment}'
+      ScheduleExpression: 'rate(1 minute)'
+      State: ENABLED
+      Targets:
+        - Id: IncrementalSyncLambda
+          Arn: !GetAtt IncrementalSyncLambda.Arn
+
+  LambdaEventBridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt IncrementalSyncLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SyncScheduleRule.Arn
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'opensearch-sync-lambda-errors-${Environment}'
+      AlarmDescription: Lambda incremental sync is throwing errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IncrementalSyncLambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !If [IsProduction, 1, 5]
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'opensearch-sync-lambda-duration-${Environment}'
+      AlarmDescription: Lambda is approaching timeout limit
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IncrementalSyncLambda
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 50000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  GlueJobFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'opensearch-sync-glue-failure-${Environment}'
+      AlarmDescription: Glue initial load job failed
+      MetricName: glue.driver.aggregate.numFailedTasks
+      Namespace: Glue
+      Dimensions:
+        - Name: JobName
+          Value: !Ref GlueInitialLoadJob
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+Outputs:
+
+  GlueJobName:
+    Description: Glue initial load job name
+    Value: !Ref GlueInitialLoadJob
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobName'
+
+  LambdaFunctionName:
+    Description: Lambda incremental sync function name
+    Value: !Ref IncrementalSyncLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunction'
+
+  GlueRoleArn:
+    Description: IAM Role ARN for Glue - add this to OpenSearch data access policy
+    Value: !GetAtt GlueJobRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueRoleArn'
+
+  LambdaRoleArn:
+    Description: IAM Role ARN for Lambda - add this to OpenSearch data access policy
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaRoleArn'
+
+  PostgresSecretArn:
+    Description: Resolved ARN of the existing Secrets Manager secret
+    Value: !GetAtt SecretArnLookup.SecretArn
+    Export:
+      Name: !Sub '${AWS::StackName}-PostgresSecretArn'
+
+  AlertTopicArn:
+    Description: SNS topic ARN for failure notifications
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlertTopic'
