@@ -63,11 +63,6 @@ Parameters:
     AllowedValues: [G.1X, G.2X, G.4X]
     Description: Glue worker type
 
-  GlueNumberOfWorkers:
-    Type: Number
-    Default: 10
-    Description: Number of Glue workers for initial load
-
   LambdaMemorySize:
     Type: Number
     Default: 512
@@ -414,6 +409,7 @@ Resources:
         Variables:
           OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
           OPENSEARCH_INDEX: !Ref OpenSearchIndex
+          RECORDS_OPENSEARCH_INDEX: !Ref RecordsOpenSearchIndex
       VpcConfig:
         SubnetIds:
           - !Ref PrivateSubnet1
@@ -443,6 +439,12 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    DependsOn: SearchApiGatewayRole
+    Properties:
+      CloudWatchRoleArn: !GetAtt SearchApiGatewayRole.Arn
 
   SearchApi:
     Type: AWS::ApiGateway::RestApi
@@ -475,9 +477,22 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchLambda.Arn}/invocations'
 
+  SearchApiPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref SearchApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchLambda.Arn}/invocations'
+
   SearchApiDeployment:
     Type: AWS::ApiGateway::Deployment
-    DependsOn: SearchApiMethod
+    DependsOn: [SearchApiMethod, SearchApiPostMethod]
     Properties:
       RestApiId: !Ref SearchApi
 
@@ -577,6 +592,13 @@ Resources:
     Properties:
       ApiId: !Ref SearchHttpApi
       RouteKey: 'GET /search'
+      Target: !Sub 'integrations/${SearchHttpApiIntegration}'
+
+  SearchHttpApiPostRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SearchHttpApi
+      RouteKey: 'POST /search'
       Target: !Sub 'integrations/${SearchHttpApiIntegration}'
 
   SearchHttpApiStage:

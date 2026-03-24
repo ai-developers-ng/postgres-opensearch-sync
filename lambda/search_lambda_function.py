@@ -9,8 +9,9 @@ from requests_aws4auth import AWS4Auth
 REGION = os.environ["AWS_REGION"]
 OS_ENDPOINT = os.environ["OPENSEARCH_ENDPOINT"].lstrip("https://")
 OS_INDEX = os.environ["OPENSEARCH_INDEX"]
+RECORDS_INDEX = os.environ.get("RECORDS_OPENSEARCH_INDEX", "records")
 
-_ALLOWED_INDICES = {OS_INDEX, "records"}
+_ALLOWED_INDICES = {OS_INDEX, RECORDS_INDEX}
 
 
 def _build_os_client():
