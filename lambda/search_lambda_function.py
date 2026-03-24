@@ -117,7 +117,6 @@ def _build_os_query(query: str, must_match: dict, date_filters: dict) -> dict:
                 "query": query,
                 "fields": ["*"],
                 "default_operator": "AND",
-                "fuzziness": "AUTO",
                 "lenient": True,
             }
         }
