@@ -15,6 +15,7 @@ echo "==> [1/5] Packaging Lambda dependencies..."
 cd "$ROOT_DIR/lambda"
 mkdir -p package
 cp lambda_function.py package/
+cp search_lambda_function.py package/
 pip install psycopg2-binary==2.9.9 opensearch-py==2.4.2 requests-aws4auth==1.2.3 -t package/ -q
 cd package && zip -r "$ROOT_DIR/scripts/incremental_sync.zip" . -q && cd "$ROOT_DIR"
 echo "    Lambda zip created."

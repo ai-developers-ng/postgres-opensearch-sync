@@ -242,6 +242,12 @@ Resources:
       LogGroupName: !Sub '/aws/lambda/opensearch-incremental-sync-${Environment}'
       RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
 
+  SearchLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/opensearch-search-${Environment}'
+      RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
+
   GluePostgresConnection:
     Type: AWS::Glue::Connection
     Properties:
@@ -264,7 +270,7 @@ Resources:
     Properties:
       Name: !Sub 'postgres-to-opensearch-initial-load-${Environment}'
       Role: !GetAtt GlueJobRole.Arn
-      GlueVersion: '4.0'
+      GlueVersion: '5.1'
       WorkerType: !Ref GlueWorkerType
       NumberOfWorkers: !FindInMap [EnvConfig, !Ref Environment, GlueWorkers]
       Timeout: !FindInMap [EnvConfig, !Ref Environment, GlueTimeout]
@@ -332,6 +338,210 @@ Resources:
           - !Ref SyncSecurityGroup
       Tags:
         Environment: !Ref Environment
+
+  SearchLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: SearchLambdaLogGroup
+    Properties:
+      FunctionName: !Sub 'opensearch-search-${Environment}'
+      Runtime: python3.12
+      Handler: search_lambda_function.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !FindInMap [EnvConfig, !Ref Environment, LambdaTimeout]
+      MemorySize: !Ref LambdaMemorySize
+      ReservedConcurrentExecutions: 2
+      Code:
+        S3Bucket: !Ref AssetsBucketName
+        S3Key: scripts/incremental_sync.zip
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
+          OPENSEARCH_INDEX: !Ref OpenSearchIndex
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref SyncSecurityGroup
+      Tags:
+        Environment: !Ref Environment
+
+  SearchApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/opensearch-search-api-${Environment}'
+      RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
+
+  SearchApiGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'ApiGatewayCloudWatchRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  SearchApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'opensearch-search-api-${Environment}'
+      Description: REST API for OpenSearch search endpoint
+      EndpointConfiguration:
+        Types: [REGIONAL]
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SearchApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchApi
+      ParentId: !GetAtt SearchApi.RootResourceId
+      PathPart: search
+
+  SearchApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchApi
+      ResourceId: !Ref SearchApiResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchLambda.Arn}/invocations'
+
+  SearchApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: SearchApiMethod
+    Properties:
+      RestApiId: !Ref SearchApi
+
+  SearchApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref SearchApi
+      DeploymentId: !Ref SearchApiDeployment
+      StageName: !Ref Environment
+      AccessLogSetting:
+        DestinationArn: !GetAtt SearchApiLogGroup.Arn
+        Format: '$context.identity.sourceIp $context.requestTime $context.httpMethod $context.resourcePath $context.status $context.responseLength $context.requestId'
+      MethodSettings:
+        - ResourcePath: /search
+          HttpMethod: GET
+          ThrottlingBurstLimit: 50
+          ThrottlingRateLimit: 20
+      Tags:
+        Environment: !Ref Environment
+
+  SearchApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: SearchApiStage
+    Properties:
+      Name: !Sub 'opensearch-search-api-key-${Environment}'
+      Description: API key for Appian (or any front-end) to call the search endpoint
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref SearchApi
+          StageName: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SearchApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: SearchApiStage
+    Properties:
+      UsagePlanName: !Sub 'opensearch-search-usage-plan-${Environment}'
+      Description: Throttle and quota limits for the search API
+      ApiStages:
+        - ApiId: !Ref SearchApi
+          Stage: !Ref Environment
+      Throttle:
+        BurstLimit: 50
+        RateLimit: 20
+      Quota:
+        Limit: 100000
+        Period: MONTH
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SearchApiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref SearchApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref SearchApiUsagePlan
+
+  SearchLambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SearchLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SearchApi}/*'
+
+  # ── HTTP API (v2) ── lightweight, lower latency, no API key ──────────────
+
+  SearchHttpApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/opensearch-search-http-api-${Environment}'
+      RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
+
+  SearchHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'opensearch-search-http-api-${Environment}'
+      ProtocolType: HTTP
+      Description: HTTP API (v2) for OpenSearch search endpoint
+      Tags:
+        Environment: !Ref Environment
+
+  SearchHttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref SearchHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt SearchLambda.Arn
+      PayloadFormatVersion: '2.0'
+
+  SearchHttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SearchHttpApi
+      RouteKey: 'GET /search'
+      Target: !Sub 'integrations/${SearchHttpApiIntegration}'
+
+  SearchHttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref SearchHttpApi
+      StageName: !Ref Environment
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt SearchHttpApiLogGroup.Arn
+        Format: '$context.identity.sourceIp $context.requestTime $context.httpMethod $context.routeKey $context.status $context.responseLength $context.requestId'
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+      Tags:
+        Environment: !Ref Environment
+
+  SearchLambdaHttpApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SearchLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SearchHttpApi}/*/*/search'
 
   SyncScheduleRule:
     Type: AWS::Events::Rule
@@ -422,6 +632,30 @@ Outputs:
     Value: !Ref IncrementalSyncLambda
     Export:
       Name: !Sub '${AWS::StackName}-LambdaFunction'
+
+  SearchLambdaFunctionName:
+    Description: Lambda search function name
+    Value: !Ref SearchLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-SearchLambdaFunction'
+
+  SearchApiEndpoint:
+    Description: Search API endpoint URL (send x-api-key header with the API key value)
+    Value: !Sub 'https://${SearchApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/search'
+    Export:
+      Name: !Sub '${AWS::StackName}-SearchApiEndpoint'
+
+  SearchApiKeyId:
+    Description: API Key ID — retrieve the value from AWS Console or CLI (aws apigateway get-api-key --api-key <id> --include-value)
+    Value: !Ref SearchApiKey
+    Export:
+      Name: !Sub '${AWS::StackName}-SearchApiKeyId'
+
+  SearchHttpApiEndpoint:
+    Description: Search HTTP API (v2) endpoint URL — no API key required
+    Value: !Sub 'https://${SearchHttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/search'
+    Export:
+      Name: !Sub '${AWS::StackName}-SearchHttpApiEndpoint'
 
   GlueRoleArn:
     Description: IAM Role ARN for Glue - add this to OpenSearch data access policy
