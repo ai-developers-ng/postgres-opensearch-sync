@@ -8,22 +8,20 @@ import json
 import sys
 import boto3
 import pymysql
-import psycopg2
-import psycopg2.extras
+import psycopg
 import xmltodict
 from awsglue.utils import getResolvedOptions
 from datetime import datetime, timezone
 
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
-    'mariadb_secret_arn',
+    'mariadb_secret_arn', 'mariadb_port',
     'postgres_host', 'postgres_port', 'postgres_db', 'postgres_secret_arn',
     'aws_region',
 ])
 
 REGION         = args['aws_region']
 BATCH_SIZE     = 1000   # rows fetched from MariaDB per round-trip
-PG_PAGE_SIZE   = 500    # rows per VALUES(...) statement in execute_values
 sm_client      = boto3.client('secretsmanager', region_name=REGION)
 
 
@@ -35,6 +33,7 @@ def get_mariadb_conn():
     creds = get_secret(args['mariadb_secret_arn'])
     return pymysql.connect(
         host=creds['host'],
+        port=int(args['mariadb_port']),
         user=creds['username'],
         password=creds['password'],
         database=creds['dbname'],
@@ -45,7 +44,7 @@ def get_mariadb_conn():
 
 def get_pg_conn():
     creds = get_secret(args['postgres_secret_arn'])
-    return psycopg2.connect(
+    return psycopg.connect(
         host=args['postgres_host'],
         port=int(args['postgres_port']),
         dbname=args['postgres_db'],
@@ -58,7 +57,7 @@ def get_pg_conn():
 
 UPSERT_SQL = """
     INSERT INTO tkrsummary (tkrid, jsonsummary, createddt, createdby, updateddt, updatedby)
-    VALUES %s
+    VALUES (%s, %s, %s, %s, %s, %s)
     ON CONFLICT (tkrid) DO UPDATE
         SET jsonsummary = EXCLUDED.jsonsummary,
             updateddt   = EXCLUDED.updateddt,
@@ -148,9 +147,7 @@ def run():
             last_tkrid       = last_row['TKRID']
 
             if records:
-                psycopg2.extras.execute_values(
-                    pg_cursor, UPSERT_SQL, records, template=None, page_size=PG_PAGE_SIZE
-                )
+                pg_cursor.executemany(UPSERT_SQL, records)
                 pg_conn.commit()
 
             total_rows += len(records)

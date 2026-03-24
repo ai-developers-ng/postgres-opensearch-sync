@@ -333,7 +333,7 @@ Resources:
     Properties:
       Name: !Sub 'xml-to-postgres-initial-load-${Environment}'
       Role: !GetAtt GlueJobRole.Arn
-      GlueVersion: '3.0'
+      GlueVersion: '4.0'
       MaxCapacity: 0.0625
       Timeout: !FindInMap [EnvConfig, !Ref Environment, GlueTimeout]
       Command:
@@ -341,9 +341,10 @@ Resources:
         ScriptLocation: !Sub 's3://${AssetsBucketName}/scripts/xml_to_postgres_initial_load.py'
         PythonVersion: '3'
       DefaultArguments:
-        '--additional-python-modules': 'xmltodict==0.13.0,PyMySQL==1.1.1,psycopg2-binary==2.9.9'
+        '--additional-python-modules': 'xmltodict==0.13.0,PyMySQL==1.1.1,psycopg[binary]==3.2.3'
         '--enable-continuous-cloudwatch-log': 'true'
         '--mariadb_secret_arn': !Ref MariadbSecretArn
+        '--mariadb_port': !Ref MariadbPort
         '--postgres_host': !Ref PostgresHost
         '--postgres_port': !Ref PostgresPort
         '--postgres_db': !Ref PostgresDb
@@ -507,7 +508,7 @@ Resources:
         Format: '$context.identity.sourceIp $context.requestTime $context.httpMethod $context.resourcePath $context.status $context.responseLength $context.requestId'
       MethodSettings:
         - ResourcePath: /search
-          HttpMethod: GET
+          HttpMethod: '*'
           ThrottlingBurstLimit: 50
           ThrottlingRateLimit: 20
       Tags:
@@ -668,6 +669,7 @@ Resources:
       Environment:
         Variables:
           MARIADB_SECRET_ARN: !Ref MariadbSecretArn
+          MARIADB_PORT: !Ref MariadbPort
           POSTGRES_HOST: !Ref PostgresHost
           POSTGRES_PORT: !Ref PostgresPort
           POSTGRES_DB: !Ref PostgresDb

@@ -9,8 +9,7 @@ import os
 import time
 import boto3
 import pymysql
-import psycopg2
-import psycopg2.extras
+import psycopg
 import xmltodict
 from datetime import datetime, timezone
 
@@ -22,6 +21,7 @@ POSTGRES_DB       = os.environ['POSTGRES_DB']
 POSTGRES_SECRET_ARN = os.environ['POSTGRES_SECRET_ARN']
 CHECKPOINT_BUCKET = os.environ['CHECKPOINT_BUCKET']
 CHECKPOINT_KEY    = 'checkpoints/mariadb_sync_checkpoint.json'
+MARIADB_PORT      = int(os.environ.get('MARIADB_PORT', 3306))
 BATCH_LIMIT       = 500
 ALERT_TOPIC_ARN   = os.environ.get('ALERT_TOPIC_ARN')
 
@@ -55,6 +55,7 @@ def _mariadb_conn():
     creds = _get_mariadb_creds()
     return pymysql.connect(
         host=creds['host'],
+        port=MARIADB_PORT,
         user=creds['username'],
         password=creds['password'],
         database=creds['dbname'],
@@ -65,7 +66,7 @@ def _mariadb_conn():
 
 def _pg_conn():
     creds = _get_pg_creds()
-    return psycopg2.connect(
+    return psycopg.connect(
         host=POSTGRES_HOST,
         port=POSTGRES_PORT,
         dbname=POSTGRES_DB,
@@ -109,7 +110,7 @@ def _parse_xml(xml_text: str, tkrid: str) -> str:
 
 UPSERT_SQL = """
     INSERT INTO tkrsummary (tkrid, jsonsummary, createddt, createdby, updateddt, updatedby)
-    VALUES %s
+    VALUES (%s, %s, %s, %s, %s, %s)
     ON CONFLICT (tkrid) DO UPDATE
         SET jsonsummary = EXCLUDED.jsonsummary,
             updateddt   = EXCLUDED.updateddt,
@@ -181,9 +182,7 @@ def _sync_cycle(cycle_num: int) -> dict:
                 ))
 
             if records:
-                psycopg2.extras.execute_values(
-                    pg_cur, UPSERT_SQL, records, template=None, page_size=100
-                )
+                pg_cur.executemany(UPSERT_SQL, records)
                 pg.commit()
                 rows_upserted = len(records)
                 _save_checkpoint(last_date)

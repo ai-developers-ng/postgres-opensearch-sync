@@ -1,7 +1,7 @@
 import json
 import os
 import boto3
-import psycopg2
+import psycopg
 from datetime import datetime, timezone, timedelta
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
@@ -32,7 +32,7 @@ def get_pg_credentials():
 
 def get_pg_connection():
     creds = get_pg_credentials()
-    return psycopg2.connect(
+    return psycopg.connect(
         host=POSTGRES_HOST, port=POSTGRES_PORT, dbname=POSTGRES_DB,
         user=creds['username'], password=creds['password'],
         connect_timeout=10, options='-c statement_timeout=55000'
