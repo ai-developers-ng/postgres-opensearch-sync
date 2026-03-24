@@ -10,6 +10,8 @@ REGION = os.environ["AWS_REGION"]
 OS_ENDPOINT = os.environ["OPENSEARCH_ENDPOINT"].lstrip("https://")
 OS_INDEX = os.environ["OPENSEARCH_INDEX"]
 
+_ALLOWED_INDICES = {OS_INDEX, "records"}
+
 
 def _build_os_client():
     credentials = boto3.Session().get_credentials().get_frozen_credentials()
@@ -52,7 +54,7 @@ def _parse_request_payload(event: dict) -> dict:
     return event
 
 
-def _extract_search_params(event: dict) -> tuple[str, int]:
+def _extract_search_params(event: dict) -> tuple[str, int, str]:
     payload = _parse_request_payload(event)
     query_params = event.get("queryStringParameters") or {}
 
@@ -71,11 +73,14 @@ def _extract_search_params(event: dict) -> tuple[str, int]:
         size = 10
     size = max(1, min(size, 100))
 
-    return str(query).strip(), size
+    index_raw = str(query_params.get("index") or payload.get("index") or "").strip()
+    index = index_raw if index_raw in _ALLOWED_INDICES else OS_INDEX
+
+    return str(query).strip(), size, index
 
 
 def handler(event, context):
-    query, size = _extract_search_params(event if isinstance(event, dict) else {})
+    query, size, index = _extract_search_params(event if isinstance(event, dict) else {})
 
     if not query:
         return {
@@ -86,7 +91,7 @@ def handler(event, context):
 
     try:
         response = _os_client.search(
-            index=OS_INDEX,
+            index=index,
             body={
                 "size": size,
                 "query": {

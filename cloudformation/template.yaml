@@ -86,6 +86,24 @@ Parameters:
     Type: String
     Description: Existing S3 bucket name for Glue scripts, JARs, dependencies and checkpoints
 
+  MariadbSecretName:
+    Type: String
+    Description: Name of the existing Secrets Manager secret for MariaDB e.g. prod/mariadb/myapp
+
+  MariadbSecretArn:
+    Type: String
+    Description: Full ARN of the existing Secrets Manager secret for MariaDB
+
+  MariadbPort:
+    Type: String
+    Default: '3306'
+    Description: MariaDB port
+
+  RecordsOpenSearchIndex:
+    Type: String
+    Default: records
+    Description: Target OpenSearch index name for structured records (tkrsummary)
+
 Conditions:
   IsProduction: !Equals [!Ref Environment, prd]
 
@@ -172,7 +190,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: [secretsmanager:GetSecretValue]
-                Resource: !Ref PostgresSecretArn
+                Resource:
+                  - !Ref PostgresSecretArn
+                  - !Ref MariadbSecretArn
         - PolicyName: AOSSAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -219,7 +239,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: [secretsmanager:GetSecretValue]
-                Resource: !Ref PostgresSecretArn
+                Resource:
+                  - !Ref PostgresSecretArn
+                  - !Ref MariadbSecretArn
         - PolicyName: AOSSAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -306,6 +328,32 @@ Resources:
         '--opensearch_index': !Ref OpenSearchIndex
         '--aws_region': !Ref AWS::Region
         '--checkpoint_bucket': !Ref AssetsBucketName
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Tags:
+        Environment: !Ref Environment
+
+  GlueXmlToPostgresJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'xml-to-postgres-initial-load-${Environment}'
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: '3.0'
+      MaxCapacity: 0.0625
+      Timeout: !FindInMap [EnvConfig, !Ref Environment, GlueTimeout]
+      Command:
+        Name: pythonshell
+        ScriptLocation: !Sub 's3://${AssetsBucketName}/scripts/xml_to_postgres_initial_load.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        '--additional-python-modules': 'xmltodict==0.13.0,PyMySQL==1.1.1,psycopg2-binary==2.9.9'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--mariadb_secret_arn': !Ref MariadbSecretArn
+        '--postgres_host': !Ref PostgresHost
+        '--postgres_port': !Ref PostgresPort
+        '--postgres_db': !Ref PostgresDb
+        '--postgres_secret_arn': !Ref PostgresSecretArn
+        '--aws_region': !Ref AWS::Region
       ExecutionProperty:
         MaxConcurrentRuns: 1
       Tags:
@@ -573,6 +621,131 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt SyncScheduleRule.Arn
 
+  # ── MariaDB XML → PostgreSQL sync ────────────────────────────────────────
+
+  MariadbSyncLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/mariadb-xml-sync-${Environment}'
+      RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
+
+  MariadbSyncLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: MariadbSyncLambdaLogGroup
+    Properties:
+      FunctionName: !Sub 'mariadb-xml-sync-${Environment}'
+      Runtime: python3.12
+      Handler: mariadb_sync_lambda.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 90
+      MemorySize: !Ref LambdaMemorySize
+      ReservedConcurrentExecutions: 1
+      Code:
+        S3Bucket: !Ref AssetsBucketName
+        S3Key: scripts/mariadb_sync.zip
+      Environment:
+        Variables:
+          MARIADB_SECRET_ARN: !Ref MariadbSecretArn
+          POSTGRES_HOST: !Ref PostgresHost
+          POSTGRES_PORT: !Ref PostgresPort
+          POSTGRES_DB: !Ref PostgresDb
+          POSTGRES_SECRET_ARN: !Ref PostgresSecretArn
+          CHECKPOINT_BUCKET: !Ref AssetsBucketName
+          ENVIRONMENT: !Ref Environment
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref SyncSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  MariadbSyncScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'mariadb-xml-sync-schedule-${Environment}'
+      Description: !Sub 'Trigger MariaDB XML sync every minute (two cycles per run) - ${Environment}'
+      ScheduleExpression: 'rate(1 minute)'
+      State: ENABLED
+      Targets:
+        - Id: MariadbSyncLambda
+          Arn: !GetAtt MariadbSyncLambda.Arn
+
+  MariadbSyncLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MariadbSyncLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MariadbSyncScheduleRule.Arn
+
+  # ── PostgreSQL tkrsummary → OpenSearch records sync ──────────────────────
+
+  RecordsSyncLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/opensearch-records-sync-${Environment}'
+      RetentionInDays: !FindInMap [EnvConfig, !Ref Environment, LogRetentionDays]
+
+  RecordsSyncLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: RecordsSyncLambdaLogGroup
+    Properties:
+      FunctionName: !Sub 'opensearch-records-sync-${Environment}'
+      Runtime: python3.12
+      Handler: lambda_function.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !FindInMap [EnvConfig, !Ref Environment, LambdaTimeout]
+      MemorySize: !Ref LambdaMemorySize
+      ReservedConcurrentExecutions: 1
+      Code:
+        S3Bucket: !Ref AssetsBucketName
+        S3Key: scripts/incremental_sync.zip
+      Environment:
+        Variables:
+          POSTGRES_HOST: !Ref PostgresHost
+          POSTGRES_PORT: !Ref PostgresPort
+          POSTGRES_DB: !Ref PostgresDb
+          POSTGRES_TABLE: tkrsummary
+          POSTGRES_SECRET_ARN: !Ref PostgresSecretArn
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
+          OPENSEARCH_INDEX: !Ref RecordsOpenSearchIndex
+          CHECKPOINT_BUCKET: !Ref AssetsBucketName
+          BATCH_SIZE: !Sub '${LambdaBatchSize}'
+          ENVIRONMENT: !Ref Environment
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref SyncSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  RecordsSyncScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'opensearch-records-sync-schedule-${Environment}'
+      Description: !Sub 'Trigger records incremental sync every minute - ${Environment}'
+      ScheduleExpression: 'rate(1 minute)'
+      State: ENABLED
+      Targets:
+        - Id: RecordsSyncLambda
+          Arn: !GetAtt RecordsSyncLambda.Arn
+
+  RecordsSyncLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RecordsSyncLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RecordsSyncScheduleRule.Arn
+
   LambdaErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -691,3 +864,21 @@ Outputs:
     Value: !Ref AlertTopic
     Export:
       Name: !Sub '${AWS::StackName}-AlertTopic'
+
+  XmlToPostgresGlueJobName:
+    Description: Glue Python Shell job for MariaDB XML initial load into PostgreSQL
+    Value: !Ref GlueXmlToPostgresJob
+    Export:
+      Name: !Sub '${AWS::StackName}-XmlToPostgresGlueJob'
+
+  MariadbSyncLambdaName:
+    Description: Lambda function name for MariaDB XML → PostgreSQL recurring sync
+    Value: !Ref MariadbSyncLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-MariadbSyncLambda'
+
+  RecordsSyncLambdaName:
+    Description: Lambda function name for PostgreSQL tkrsummary → OpenSearch records sync
+    Value: !Ref RecordsSyncLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-RecordsSyncLambda'
