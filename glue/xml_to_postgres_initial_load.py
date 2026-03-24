@@ -21,9 +21,10 @@ args = getResolvedOptions(sys.argv, [
     'aws_region',
 ])
 
-REGION       = args['aws_region']
-BATCH_SIZE   = 500
-sm_client    = boto3.client('secretsmanager', region_name=REGION)
+REGION         = args['aws_region']
+BATCH_SIZE     = 1000   # rows fetched from MariaDB per round-trip
+PG_PAGE_SIZE   = 500    # rows per VALUES(...) statement in execute_values
+sm_client      = boto3.client('secretsmanager', region_name=REGION)
 
 
 def get_secret(arn: str) -> dict:
@@ -84,18 +85,37 @@ def run():
 
     total_rows    = 0
     total_skipped = 0
-    offset        = 0
+
+    # Keyset pagination cursors — avoids O(n²) OFFSET scanning.
+    # We page on (CREATE_DATE, TKRID) so each query uses an index seek
+    # rather than scanning and discarding all prior rows.
+    last_create_date = None
+    last_tkrid       = None
 
     try:
         while True:
             with mariadb_conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT TKRID, CREATE_DATE, SUMMARYCLOB "
-                    "FROM TKRSUMMARY "
-                    "ORDER BY CREATE_DATE ASC "
-                    "LIMIT %s OFFSET %s",
-                    (BATCH_SIZE, offset),
-                )
+                if last_create_date is None:
+                    # First page — no prior cursor
+                    cursor.execute(
+                        "SELECT TKRID, CREATE_DATE, SUMMARYCLOB "
+                        "FROM TKRSUMMARY "
+                        "ORDER BY CREATE_DATE ASC, TKRID ASC "
+                        "LIMIT %s",
+                        (BATCH_SIZE,),
+                    )
+                else:
+                    # Subsequent pages — seek past last seen (CREATE_DATE, TKRID).
+                    # The OR handles ties on CREATE_DATE correctly.
+                    cursor.execute(
+                        "SELECT TKRID, CREATE_DATE, SUMMARYCLOB "
+                        "FROM TKRSUMMARY "
+                        "WHERE CREATE_DATE > %s "
+                        "   OR (CREATE_DATE = %s AND TKRID > %s) "
+                        "ORDER BY CREATE_DATE ASC, TKRID ASC "
+                        "LIMIT %s",
+                        (last_create_date, last_create_date, last_tkrid, BATCH_SIZE),
+                    )
                 rows = cursor.fetchall()
 
             if not rows:
@@ -103,9 +123,9 @@ def run():
 
             records = []
             for row in rows:
-                tkrid      = row['TKRID']
+                tkrid       = row['TKRID']
                 create_date = row['CREATE_DATE']
-                xml_text   = row['SUMMARYCLOB'] or ''
+                xml_text    = row['SUMMARYCLOB'] or ''
 
                 if not xml_text.strip():
                     print(f"[WARN] Empty SUMMARYCLOB for TKRID={tkrid}, skipping")
@@ -122,18 +142,24 @@ def run():
                     'glue-initial-load',
                 ))
 
+            # Advance the keyset cursor to the last row of this batch
+            last_row         = rows[-1]
+            last_create_date = last_row['CREATE_DATE']
+            last_tkrid       = last_row['TKRID']
+
             if records:
                 psycopg2.extras.execute_values(
-                    pg_cursor, UPSERT_SQL, records, template=None, page_size=100
+                    pg_cursor, UPSERT_SQL, records, template=None, page_size=PG_PAGE_SIZE
                 )
                 pg_conn.commit()
 
-            batch_count = len(rows)
             total_rows += len(records)
-            offset     += batch_count
-            print(f"[INFO] Processed offset={offset}, total upserted so far={total_rows}, skipped={total_skipped}")
+            print(
+                f"[INFO] Batch done: upserted={len(records)}, skipped={BATCH_SIZE - len(records) - (BATCH_SIZE - len(rows))}, "
+                f"total_upserted={total_rows}, cursor=({last_create_date}, {last_tkrid})"
+            )
 
-            if batch_count < BATCH_SIZE:
+            if len(rows) < BATCH_SIZE:
                 break
 
     except Exception as e:
