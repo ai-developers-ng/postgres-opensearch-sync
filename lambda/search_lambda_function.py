@@ -69,8 +69,8 @@ def _extract_search_params(event: dict) -> tuple[str, int]:
         size = int(size_raw)
     except (TypeError, ValueError):
         size = 10
-
     size = max(1, min(size, 100))
+
     return str(query).strip(), size
 
 
@@ -90,10 +90,12 @@ def handler(event, context):
             body={
                 "size": size,
                 "query": {
-                    "multi_match": {
+                    "query_string": {
                         "query": query,
                         "fields": ["*"],
+                        "default_operator": "AND",
                         "fuzziness": "AUTO",
+                        "lenient": True,
                     }
                 },
             },

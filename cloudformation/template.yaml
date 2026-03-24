@@ -135,6 +135,14 @@ Resources:
         - Key: Name
           Value: !Sub 'opensearch-sync-sg-${Environment}'
 
+  SyncSecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt SyncSecurityGroup.GroupId
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !GetAtt SyncSecurityGroup.GroupId
+      Description: Allow all traffic between Glue Spark workers in the same security group
+
   GlueJobRole:
     Type: AWS::IAM::Role
     Properties:
@@ -337,7 +345,8 @@ Resources:
         SecurityGroupIds:
           - !Ref SyncSecurityGroup
       Tags:
-        Environment: !Ref Environment
+        - Key: Environment
+          Value: !Ref Environment
 
   SearchLambda:
     Type: AWS::Lambda::Function
@@ -364,7 +373,8 @@ Resources:
         SecurityGroupIds:
           - !Ref SyncSecurityGroup
       Tags:
-        Environment: !Ref Environment
+        - Key: Environment
+          Value: !Ref Environment
 
   SearchApiLogGroup:
     Type: AWS::Logs::LogGroup
@@ -438,7 +448,8 @@ Resources:
           ThrottlingBurstLimit: 50
           ThrottlingRateLimit: 20
       Tags:
-        Environment: !Ref Environment
+        - Key: Environment
+          Value: !Ref Environment
 
   SearchApiKey:
     Type: AWS::ApiGateway::ApiKey
