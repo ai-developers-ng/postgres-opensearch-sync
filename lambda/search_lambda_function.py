@@ -54,7 +54,7 @@ def _parse_request_payload(event: dict) -> dict:
     return event
 
 
-def _extract_search_params(event: dict) -> tuple[str, int, str]:
+def _extract_search_params(event: dict) -> tuple[str, int, str, dict, dict]:
     payload = _parse_request_payload(event)
     query_params = event.get("queryStringParameters") or {}
 
@@ -76,34 +76,96 @@ def _extract_search_params(event: dict) -> tuple[str, int, str]:
     index_raw = str(query_params.get("index") or payload.get("index") or "").strip()
     index = index_raw if index_raw in _ALLOWED_INDICES else OS_INDEX
 
-    return str(query).strip(), size, index
+    # must_match: {field: value} — each field must match 100% (match_phrase)
+    raw_must_match = payload.get("must_match")
+    must_match = {}
+    if isinstance(raw_must_match, dict):
+        for k, v in raw_must_match.items():
+            k = str(k).strip()
+            v = str(v).strip()
+            if k and v:
+                must_match[k] = v
+
+    # date_filters: {field: {gte: "...", lte: "..."}} — applied as range filter
+    raw_date_filters = payload.get("date_filters")
+    date_filters = {}
+    if isinstance(raw_date_filters, dict):
+        for field, bounds in raw_date_filters.items():
+            field = str(field).strip()
+            if not field or not isinstance(bounds, dict):
+                continue
+            range_clause = {}
+            for op in ("gte", "lte", "gt", "lt"):
+                if op in bounds and bounds[op] is not None:
+                    range_clause[op] = str(bounds[op]).strip()
+            if range_clause:
+                date_filters[field] = range_clause
+
+    return str(query).strip(), size, index, must_match, date_filters
+
+
+def _build_os_query(query: str, must_match: dict, date_filters: dict) -> dict:
+    """
+    Unstructured (no must_match/date_filters): simple query_string with fuzziness.
+    Structured (must_match or date_filters present): bool query with:
+      - must: query_string for keyword spread + match_phrase per exact-match field
+      - filter: range per date field
+    """
+    if not must_match and not date_filters:
+        return {
+            "query_string": {
+                "query": query,
+                "fields": ["*"],
+                "default_operator": "AND",
+                "fuzziness": "AUTO",
+                "lenient": True,
+            }
+        }
+
+    must = []
+    if query:
+        must.append({
+            "query_string": {
+                "query": query,
+                "fields": ["*"],
+                "default_operator": "AND",
+                "lenient": True,
+            }
+        })
+    for field, value in must_match.items():
+        must.append({"match_phrase": {field: value}})
+
+    filters = [{"range": {field: bounds}} for field, bounds in date_filters.items()]
+
+    bool_clause = {}
+    if must:
+        bool_clause["must"] = must
+    if filters:
+        bool_clause["filter"] = filters
+
+    return {"bool": bool_clause}
 
 
 def handler(event, context):
-    query, size, index = _extract_search_params(event if isinstance(event, dict) else {})
+    query, size, index, must_match, date_filters = _extract_search_params(
+        event if isinstance(event, dict) else {}
+    )
 
-    if not query:
+    if not query and not must_match and not date_filters:
         return {
             "statusCode": 400,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": "Missing search query. Provide 'q' or 'query'."}),
+            "body": json.dumps({
+                "error": "Missing search criteria. Provide 'q', 'must_match', or 'date_filters'."
+            }),
         }
+
+    os_query = _build_os_query(query, must_match, date_filters)
 
     try:
         response = _os_client.search(
             index=index,
-            body={
-                "size": size,
-                "query": {
-                    "query_string": {
-                        "query": query,
-                        "fields": ["*"],
-                        "default_operator": "AND",
-                        "fuzziness": "AUTO",
-                        "lenient": True,
-                    }
-                },
-            },
+            body={"size": size, "query": os_query},
         )
     except Exception as exc:
         return {
@@ -136,6 +198,9 @@ def handler(event, context):
         "body": json.dumps(
             {
                 "query": query,
+                "must_match": must_match if must_match else None,
+                "date_filters": date_filters if date_filters else None,
+                "index": index,
                 "total_hits": total_hits,
                 "results": results,
             }
