@@ -472,7 +472,7 @@ Resources:
       RestApiId: !Ref SearchApi
       ResourceId: !Ref SearchApiResource
       HttpMethod: GET
-      AuthorizationType: NONE
+      AuthorizationType: AWS_IAM
       ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
@@ -485,7 +485,7 @@ Resources:
       RestApiId: !Ref SearchApi
       ResourceId: !Ref SearchApiResource
       HttpMethod: POST
-      AuthorizationType: NONE
+      AuthorizationType: AWS_IAM
       ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
@@ -512,6 +512,9 @@ Resources:
           HttpMethod: '*'
           ThrottlingBurstLimit: 50
           ThrottlingRateLimit: 20
+          LoggingLevel: ERROR
+          DataTraceEnabled: false
+          MetricsEnabled: true
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -594,6 +597,7 @@ Resources:
     Properties:
       ApiId: !Ref SearchHttpApi
       RouteKey: 'GET /search'
+      AuthorizationType: AWS_IAM
       Target: !Sub 'integrations/${SearchHttpApiIntegration}'
 
   SearchHttpApiPostRoute:
@@ -601,6 +605,7 @@ Resources:
     Properties:
       ApiId: !Ref SearchHttpApi
       RouteKey: 'POST /search'
+      AuthorizationType: AWS_IAM
       Target: !Sub 'integrations/${SearchHttpApiIntegration}'
 
   SearchHttpApiStage:
