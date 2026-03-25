@@ -295,7 +295,7 @@ Resources:
     Properties:
       Name: !Sub 'postgres-to-opensearch-initial-load-${Environment}'
       Role: !GetAtt GlueJobRole.Arn
-      GlueVersion: '5.1'
+      GlueVersion: '5.0'
       WorkerType: !Ref GlueWorkerType
       NumberOfWorkers: !FindInMap [EnvConfig, !Ref Environment, GlueWorkers]
       Timeout: !FindInMap [EnvConfig, !Ref Environment, GlueTimeout]
@@ -508,7 +508,7 @@ Resources:
         DestinationArn: !GetAtt SearchApiLogGroup.Arn
         Format: '$context.identity.sourceIp $context.requestTime $context.httpMethod $context.resourcePath $context.status $context.responseLength $context.requestId'
       MethodSettings:
-        - ResourcePath: /search
+        - ResourcePath: ~1search
           HttpMethod: '*'
           ThrottlingBurstLimit: 50
           ThrottlingRateLimit: 20
