@@ -500,6 +500,7 @@ Resources:
 
   SearchApiStage:
     Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
     Properties:
       RestApiId: !Ref SearchApi
       DeploymentId: !Ref SearchApiDeployment
