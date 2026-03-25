@@ -472,7 +472,7 @@ Resources:
       RestApiId: !Ref SearchApi
       ResourceId: !Ref SearchApiResource
       HttpMethod: GET
-      AuthorizationType: AWS_IAM
+      AuthorizationType: NONE
       ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
@@ -485,7 +485,7 @@ Resources:
       RestApiId: !Ref SearchApi
       ResourceId: !Ref SearchApiResource
       HttpMethod: POST
-      AuthorizationType: AWS_IAM
+      AuthorizationType: NONE
       ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
@@ -597,7 +597,6 @@ Resources:
     Properties:
       ApiId: !Ref SearchHttpApi
       RouteKey: 'GET /search'
-      AuthorizationType: AWS_IAM
       Target: !Sub 'integrations/${SearchHttpApiIntegration}'
 
   SearchHttpApiPostRoute:
@@ -605,7 +604,6 @@ Resources:
     Properties:
       ApiId: !Ref SearchHttpApi
       RouteKey: 'POST /search'
-      AuthorizationType: AWS_IAM
       Target: !Sub 'integrations/${SearchHttpApiIntegration}'
 
   SearchHttpApiStage:
