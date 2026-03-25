@@ -42,8 +42,14 @@ POLICY
 )
 
 echo "==> Updating OpenSearch Serverless data access policy: ${POLICY_NAME}..."
-if aws opensearchserverless get-access-policy --name "${POLICY_NAME}" --type data --region "${REGION}" &>/dev/null; then
-  aws opensearchserverless update-access-policy --name "${POLICY_NAME}" --type data --policy "${POLICY}" --region "${REGION}"
+EXISTING=$(aws opensearchserverless get-access-policy --name "${POLICY_NAME}" --type data --region "${REGION}" 2>/dev/null || true)
+if [ -n "${EXISTING}" ]; then
+  POLICY_VERSION=$(echo "${EXISTING}" | python3 -c "import sys,json; print(json.load(sys.stdin)['accessPolicyDetail']['policyVersion'])")
+  aws opensearchserverless update-access-policy \
+    --name "${POLICY_NAME}" --type data \
+    --policy "${POLICY}" \
+    --policy-version "${POLICY_VERSION}" \
+    --region "${REGION}"
   echo "    Policy updated."
 else
   aws opensearchserverless create-access-policy --name "${POLICY_NAME}" --type data --policy "${POLICY}" --region "${REGION}"
