@@ -508,21 +508,6 @@ Resources:
       AccessLogSetting:
         DestinationArn: !GetAtt SearchApiLogGroup.Arn
         Format: '$context.identity.sourceIp $context.requestTime $context.httpMethod $context.resourcePath $context.status $context.responseLength $context.requestId'
-      MethodSettings:
-        - ResourcePath: /search
-          HttpMethod: GET
-          ThrottlingBurstLimit: 50
-          ThrottlingRateLimit: 20
-          LoggingLevel: ERROR
-          DataTraceEnabled: false
-          MetricsEnabled: true
-        - ResourcePath: /search
-          HttpMethod: POST
-          ThrottlingBurstLimit: 50
-          ThrottlingRateLimit: 20
-          LoggingLevel: ERROR
-          DataTraceEnabled: false
-          MetricsEnabled: true
       Tags:
         - Key: Environment
           Value: !Ref Environment
