@@ -5,6 +5,7 @@ and bulk-upserts into PostgreSQL tkrsummary table.
 """
 
 import json
+import os
 import sys
 import boto3
 import pymysql
@@ -22,6 +23,7 @@ args = getResolvedOptions(sys.argv, [
 
 REGION         = args['aws_region']
 BATCH_SIZE     = 1000   # rows fetched from MariaDB per round-trip
+SSL_CA_BUNDLE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'global-bundle.pem')
 sm_client      = boto3.client('secretsmanager', region_name=REGION)
 
 
@@ -38,6 +40,7 @@ def get_mariadb_conn():
         password=creds['password'],
         database=creds['dbname'],
         connect_timeout=10,
+        ssl={'ca': SSL_CA_BUNDLE},
         cursorclass=pymysql.cursors.DictCursor,
     )
 

@@ -23,6 +23,7 @@ CHECKPOINT_BUCKET = os.environ['CHECKPOINT_BUCKET']
 CHECKPOINT_KEY    = 'checkpoints/mariadb_sync_checkpoint.json'
 MARIADB_PORT      = int(os.environ.get('MARIADB_PORT', 3306))
 BATCH_LIMIT       = 500
+SSL_CA_BUNDLE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'global-bundle.pem')
 ALERT_TOPIC_ARN   = os.environ.get('ALERT_TOPIC_ARN')
 
 s3_client  = boto3.client('s3')
@@ -60,6 +61,7 @@ def _mariadb_conn():
         password=creds['password'],
         database=creds['dbname'],
         connect_timeout=10,
+        ssl={'ca': SSL_CA_BUNDLE},
         cursorclass=pymysql.cursors.DictCursor,
     )
 

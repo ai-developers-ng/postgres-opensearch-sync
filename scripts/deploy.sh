@@ -11,6 +11,15 @@ STACK_NAME="opensearch-sync-${ENV}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
+echo "==> Downloading AWS RDS global certificate bundle..."
+GLOBAL_BUNDLE="$ROOT_DIR/scripts/global-bundle.pem"
+if [ ! -f "${GLOBAL_BUNDLE}" ]; then
+  curl -sSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o "${GLOBAL_BUNDLE}"
+  echo "    global-bundle.pem downloaded."
+else
+  echo "    global-bundle.pem already present."
+fi
+
 echo "==> [1/5] Packaging Lambda dependencies..."
 cd "$ROOT_DIR/lambda"
 mkdir -p package
@@ -24,6 +33,7 @@ echo "==> Packaging MariaDB sync Lambda..."
 cd "$ROOT_DIR/lambda"
 mkdir -p mariadb_package
 cp mariadb_sync_lambda.py mariadb_package/
+cp "${GLOBAL_BUNDLE}" mariadb_package/global-bundle.pem
 pip install "psycopg[binary]==3.2.3" PyMySQL==1.1.1 xmltodict==0.13.0 -t mariadb_package/ -q
 cd mariadb_package && zip -r "$ROOT_DIR/scripts/mariadb_sync.zip" . -q && cd "$ROOT_DIR"
 rm -rf "$ROOT_DIR/lambda/mariadb_package"
@@ -42,6 +52,7 @@ aws s3 cp "$ROOT_DIR/glue/xml_to_postgres_initial_load.py"     "s3://${BUCKET}/s
 aws s3 cp "$ROOT_DIR/scripts/incremental_sync.zip"             "s3://${BUCKET}/scripts/incremental_sync.zip" --region "${REGION}"
 aws s3 cp "$ROOT_DIR/scripts/mariadb_sync.zip"                 "s3://${BUCKET}/scripts/mariadb_sync.zip" --region "${REGION}"
 aws s3 cp "$ROOT_DIR/scripts/dependencies.zip"                 "s3://${BUCKET}/jars/dependencies.zip" --region "${REGION}"
+aws s3 cp "${GLOBAL_BUNDLE}"                                   "s3://${BUCKET}/scripts/global-bundle.pem" --region "${REGION}"
 echo "    Assets uploaded."
 
 if [ -f "$ROOT_DIR/scripts/postgresql-42.7.3.jar" ]; then
