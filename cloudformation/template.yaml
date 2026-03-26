@@ -345,6 +345,7 @@ Resources:
         PythonVersion: '3'
       DefaultArguments:
         '--additional-python-modules': 'xmltodict==0.13.0,PyMySQL==1.1.1,psycopg[binary]==3.2.3'
+        '--pip-install-args': '--trusted-host pypi.org --trusted-host files.pythonhosted.org'
         '--extra-files': !Sub 's3://${AssetsBucketName}/scripts/global-bundle.pem'
         '--enable-continuous-cloudwatch-log': 'true'
         '--mariadb_secret_arn': !Ref MariadbSecretArn
