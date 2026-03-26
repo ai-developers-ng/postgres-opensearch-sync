@@ -106,16 +106,19 @@ Mappings:
   EnvConfig:
     dev:
       GlueTimeout: 60
+      XmlGlueTimeout: 240
       LambdaTimeout: 58
       LogRetentionDays: 3
       GlueWorkers: 2
     stg:
       GlueTimeout: 120
+      XmlGlueTimeout: 480
       LambdaTimeout: 58
       LogRetentionDays: 7
       GlueWorkers: 5
     prd:
       GlueTimeout: 240
+      XmlGlueTimeout: 960
       LambdaTimeout: 58
       LogRetentionDays: 30
       GlueWorkers: 10
@@ -335,7 +338,7 @@ Resources:
       Role: !GetAtt GlueJobRole.Arn
       GlueVersion: '3.0'
       MaxCapacity: 0.0625
-      Timeout: !FindInMap [EnvConfig, !Ref Environment, GlueTimeout]
+      Timeout: !FindInMap [EnvConfig, !Ref Environment, XmlGlueTimeout]
       Command:
         Name: pythonshell
         ScriptLocation: !Sub 's3://${AssetsBucketName}/scripts/xml_to_postgres_initial_load.py'

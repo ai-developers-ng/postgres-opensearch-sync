@@ -61,7 +61,8 @@ def get_mariadb_conn():
         user=creds['username'],
         password=creds['password'],
         database=creds['dbname'],
-        connect_timeout=10,
+        connect_timeout=30,
+        read_timeout=300,
         ssl={'ca': SSL_CA_BUNDLE},
         cursorclass=pymysql.cursors.DictCursor,
     )
@@ -75,8 +76,7 @@ def get_pg_conn():
         dbname=args['postgres_db'],
         user=creds['username'],
         password=creds['password'],
-        connect_timeout=10,
-        options='-c statement_timeout=120000',
+        connect_timeout=30,
     )
 
 
