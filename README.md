@@ -30,8 +30,9 @@ postgres-opensearch-sync/
 ├── cloudformation/
 │   └── template.yaml                    # Full CloudFormation stack
 ├── glue/
-│   ├── initial_load.py                  # PySpark: PostgreSQL → OpenSearch initial load
-│   └── xml_to_postgres_initial_load.py  # Python Shell: MariaDB XML → PostgreSQL initial load
+│   ├── initial_load.py                              # PySpark: PostgreSQL → OpenSearch initial load
+│   ├── xml_to_postgres_initial_load.py              # Python Shell: MariaDB XML → PostgreSQL initial load
+│   └── tkrsummary_to_opensearch_initial_load.py     # Python Shell: PostgreSQL tkrsummary → OpenSearch records initial load
 ├── lambda/
 │   ├── lambda_function.py               # Incremental sync: PostgreSQL → OpenSearch
 │   ├── mariadb_sync_lambda.py           # Incremental sync: MariaDB → PostgreSQL (30s)
@@ -79,9 +80,18 @@ Secrets Manager secrets must have keys: `username`, `password`, `host` (MariaDB 
 # Update OpenSearch data access policy to allow Glue + Lambda IAM roles
 ./scripts/update_opensearch_access.sh prd my-collection glue-access us-east-1
 
-# Run initial loads
-aws glue start-job-run --job-name postgres-to-opensearch-initial-load-prd
+# Run initial loads IN ORDER (wait for each to complete before starting the next)
+# Step 1: Load MariaDB XML → PostgreSQL tkrsummary (also seeds mariadb_sync checkpoint)
 aws glue start-job-run --job-name xml-to-postgres-initial-load-prd
+
+# Step 2: Bulk index tkrsummary → OpenSearch records (also seeds tkrsummary_watermark)
+aws glue start-job-run --job-name tkrsummary-to-opensearch-initial-load-prd
+
+# Step 3: Bulk index PostgreSQL documents → OpenSearch documents
+aws glue start-job-run --job-name postgres-to-opensearch-initial-load-prd
+
+# Step 4: Re-enable incremental sync (was disabled to avoid conflict with initial load)
+aws events enable-rule --name mariadb-xml-sync-schedule-prd
 ```
 
 ## Data Pipelines
@@ -110,8 +120,11 @@ aws glue start-job-run --job-name xml-to-postgres-initial-load-prd
 
 | Component | Detail |
 |-----------|--------|
-| Sync | Lambda `lambda_function.handler` (same code as pipeline 1), pointed at `tkrsummary` table and `records` index |
-| CFN resources | `RecordsSyncLambda`, `RecordsSyncScheduleRule` |
+| Initial load | Glue Python Shell (`glue/tkrsummary_to_opensearch_initial_load.py`) — keyset pagination on `tkrid`, bulk indexes into `records` index, seeds `checkpoints/tkrsummary_watermark.json` on completion |
+| Incremental sync | Lambda `lambda_function.handler` (same code as pipeline 1), pointed at `tkrsummary` table and `records` index, watermark at `checkpoints/tkrsummary_watermark.json` |
+| CFN resources | `GlueTkrsummaryToOSJob`, `RecordsSyncLambda`, `RecordsSyncScheduleRule` |
+
+> **Run order for initial setup:** `xml-to-postgres` → `tkrsummary-to-opensearch` → `postgres-to-opensearch` → re-enable `mariadb-xml-sync-schedule` rule.
 
 ## Search API
 
