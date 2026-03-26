@@ -7,23 +7,28 @@ and bulk-upserts into PostgreSQL tkrsummary table.
 import json
 import os
 import sys
+import argparse
 import boto3
 import pymysql
 import psycopg
 import xmltodict
-from awsglue.utils import getResolvedOptions
 from datetime import datetime, timezone
 
-args = getResolvedOptions(sys.argv, [
-    'JOB_NAME',
-    'mariadb_secret_arn', 'mariadb_port',
-    'postgres_host', 'postgres_port', 'postgres_db', 'postgres_secret_arn',
-    'aws_region',
-])
+parser = argparse.ArgumentParser()
+parser.add_argument('--JOB_NAME',             default='xml-to-postgres-initial-load')
+parser.add_argument('--mariadb_secret_arn',   required=True)
+parser.add_argument('--mariadb_port',         required=True)
+parser.add_argument('--postgres_host',        required=True)
+parser.add_argument('--postgres_port',        required=True)
+parser.add_argument('--postgres_db',          required=True)
+parser.add_argument('--postgres_secret_arn',  required=True)
+parser.add_argument('--aws_region',           required=True)
+parsed, _ = parser.parse_known_args()
+args = vars(parsed)
 
 REGION         = args['aws_region']
 BATCH_SIZE     = 1000   # rows fetched from MariaDB per round-trip
-SSL_CA_BUNDLE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'global-bundle.pem')
+SSL_CA_BUNDLE  = os.path.join(os.getcwd(), 'global-bundle.pem')
 sm_client      = boto3.client('secretsmanager', region_name=REGION)
 
 
