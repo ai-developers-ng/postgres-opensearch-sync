@@ -333,7 +333,7 @@ Resources:
     Properties:
       Name: !Sub 'xml-to-postgres-initial-load-${Environment}'
       Role: !GetAtt GlueJobRole.Arn
-      GlueVersion: '4.0'
+      GlueVersion: '3.0'
       MaxCapacity: 0.0625
       Timeout: !FindInMap [EnvConfig, !Ref Environment, GlueTimeout]
       Command:
