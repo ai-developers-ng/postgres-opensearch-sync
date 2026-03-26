@@ -28,7 +28,21 @@ args = vars(parsed)
 
 REGION         = args['aws_region']
 BATCH_SIZE     = 1000   # rows fetched from MariaDB per round-trip
-SSL_CA_BUNDLE  = os.path.join(os.getcwd(), 'global-bundle.pem')
+
+# Glue Python Shell places --extra-files in the working directory.
+# Search common candidate paths in case cwd differs between runs.
+def _find_bundle() -> str:
+    candidates = [
+        os.path.join(os.getcwd(), 'global-bundle.pem'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'global-bundle.pem'),
+        '/tmp/global-bundle.pem',
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(f"global-bundle.pem not found; searched: {candidates}")
+
+SSL_CA_BUNDLE  = _find_bundle()
 sm_client      = boto3.client('secretsmanager', region_name=REGION)
 
 
