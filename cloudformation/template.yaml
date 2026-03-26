@@ -23,7 +23,7 @@ Parameters:
 
   PostgresTable:
     Type: String
-    Description: Source table e.g. public.documents
+    Description: Schema-qualified source table for tkrdocumentcontent sync e.g. "TKRDOCUMENT".tkrdocumentcontent
 
   PostgresSecretName:
     Type: String
@@ -307,7 +307,7 @@ Resources:
         Connections:
           - !Ref GluePostgresConnection
       DefaultArguments:
-        '--extra-jars': !Sub 's3://${AssetsBucketName}/jars/postgresql-42.7.3.jar'
+        '--extra-jars': !Sub 's3://${AssetsBucketName}/jars/postgresql-42.7.10.jar'
         '--extra-py-files': !Sub 's3://${AssetsBucketName}/jars/dependencies.zip'
         '--job-language': 'python'
         '--enable-continuous-cloudwatch-log': 'true'
@@ -380,6 +380,7 @@ Resources:
           OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
           OPENSEARCH_INDEX: !Ref OpenSearchIndex
           CHECKPOINT_BUCKET: !Ref AssetsBucketName
+          CHECKPOINT_KEY: checkpoints/tkrdocumentcontent_watermark.json
           BATCH_SIZE: !Sub '${LambdaBatchSize}'
           ENVIRONMENT: !Ref Environment
           ALERT_TOPIC_ARN: !Ref AlertTopic
@@ -511,7 +512,6 @@ Resources:
       Tags:
         - Key: Environment
           Value: !Ref Environment
-
   SearchApiKey:
     Type: AWS::ApiGateway::ApiKey
     DependsOn: SearchApiStage
@@ -730,11 +730,12 @@ Resources:
           POSTGRES_HOST: !Ref PostgresHost
           POSTGRES_PORT: !Ref PostgresPort
           POSTGRES_DB: !Ref PostgresDb
-          POSTGRES_TABLE: tkrsummary
+          POSTGRES_TABLE: '"TKR".tkrsummary'
           POSTGRES_SECRET_ARN: !Ref PostgresSecretArn
           OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
           OPENSEARCH_INDEX: !Ref RecordsOpenSearchIndex
           CHECKPOINT_BUCKET: !Ref AssetsBucketName
+          CHECKPOINT_KEY: checkpoints/tkrsummary_watermark.json
           BATCH_SIZE: !Sub '${LambdaBatchSize}'
           ENVIRONMENT: !Ref Environment
           ALERT_TOPIC_ARN: !Ref AlertTopic

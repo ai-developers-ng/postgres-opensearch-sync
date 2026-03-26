@@ -55,11 +55,11 @@ aws s3 cp "$ROOT_DIR/scripts/dependencies.zip"                 "s3://${BUCKET}/j
 aws s3 cp "${GLOBAL_BUNDLE}"                                   "s3://${BUCKET}/scripts/global-bundle.pem" --region "${REGION}"
 echo "    Assets uploaded."
 
-if [ -f "$ROOT_DIR/scripts/postgresql-42.7.3.jar" ]; then
-  aws s3 cp "$ROOT_DIR/scripts/postgresql-42.7.3.jar" "s3://${BUCKET}/jars/postgresql-42.7.3.jar" --region "${REGION}"
+if [ -f "$ROOT_DIR/scripts/postgresql-42.7.10.jar" ]; then
+  aws s3 cp "$ROOT_DIR/scripts/postgresql-42.7.10.jar" "s3://${BUCKET}/jars/postgresql-42.7.10.jar" --region "${REGION}"
   echo "    JDBC driver uploaded."
 else
-  echo "    [WARN] postgresql-42.7.3.jar not found in scripts/ — upload manually if not already in S3"
+  echo "    [WARN] postgresql-42.7.10.jar not found in scripts/ — upload manually if not already in S3"
 fi
 
 echo "==> [4/5] Deploying CloudFormation stack: ${STACK_NAME}..."
