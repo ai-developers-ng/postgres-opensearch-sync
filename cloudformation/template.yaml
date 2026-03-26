@@ -355,6 +355,7 @@ Resources:
         '--postgres_db': !Ref PostgresDb
         '--postgres_secret_arn': !Ref PostgresSecretArn
         '--aws_region': !Ref AWS::Region
+        '--checkpoint_bucket': !Ref AssetsBucketName
       ExecutionProperty:
         MaxConcurrentRuns: 1
       Tags:

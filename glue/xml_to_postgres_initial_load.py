@@ -23,6 +23,7 @@ parser.add_argument('--postgres_port',        required=True)
 parser.add_argument('--postgres_db',          required=True)
 parser.add_argument('--postgres_secret_arn',  required=True)
 parser.add_argument('--aws_region',           required=True)
+parser.add_argument('--checkpoint_bucket',    default='')
 parsed, _ = parser.parse_known_args()
 args = vars(parsed)
 
@@ -194,6 +195,21 @@ def run():
         mariadb_conn.close()
 
     print(f"[DONE] Initial load complete. Total upserted={total_rows}, skipped={total_skipped}")
+
+    # Seed the Lambda checkpoint so the incremental sync won't re-process
+    # all historical rows when the EventBridge rule is re-enabled.
+    checkpoint_bucket = args.get('checkpoint_bucket')
+    if checkpoint_bucket:
+        checkpoint_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+        s3 = boto3.client('s3', region_name=REGION)
+        s3.put_object(
+            Bucket=checkpoint_bucket,
+            Key='checkpoints/mariadb_sync_checkpoint.json',
+            Body=json.dumps({'last_create_date': checkpoint_date}),
+        )
+        print(f"[INFO] Lambda checkpoint seeded: last_create_date={checkpoint_date}")
+    else:
+        print("[WARN] --checkpoint_bucket not provided; Lambda checkpoint not seeded")
 
 
 run()
