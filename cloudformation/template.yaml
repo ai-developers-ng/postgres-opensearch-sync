@@ -694,7 +694,7 @@ Resources:
       Name: !Sub 'mariadb-xml-sync-schedule-${Environment}'
       Description: !Sub 'Trigger MariaDB XML sync every minute (two cycles per run) - ${Environment}'
       ScheduleExpression: 'rate(1 minute)'
-      State: ENABLED
+      State: DISABLED
       Targets:
         - Id: MariadbSyncLambda
           Arn: !GetAtt MariadbSyncLambda.Arn
